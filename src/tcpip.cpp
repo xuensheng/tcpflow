@@ -32,10 +32,10 @@
  *
  * called from tcpdemux::create_tcpip()
  */
-tcpip::tcpip(tcpdemux &demux_,const flow &flow_,be13::tcp_seq isn_):
-    demux(demux_),myflow(flow_),dir(unknown),isn(isn_),nsn(0),
-    syn_count(0),fin_count(0),fin_size(0),pos(0),
-    flow_pathname(),fd(-1),file_created(false),
+tcpip::tcpip(tcpdemux &demux_,const flow &flow_,be13::tcp_seq isn_, appplugin* plugin):
+    demux(demux_),myplugin(plugin), myflow(flow_),dir(unknown),isn(isn_),nsn(0),
+    syn_count(0),fin_count(0),fin_size(0),pos(0),rpos(0),
+    flow_pathname(),fd(-1),rfd(-1),file_created(false),
     flow_index_pathname(),idx_file(),
     seen(new recon_set()),
     last_byte(),
@@ -103,6 +103,7 @@ tcpip::~tcpip()
 {
     assert(fd<0);                       // file must be closed
     if(seen) delete seen;
+    if(myplugin) delete myplugin;
 }
 
 #pragma GCC diagnostic warning "-Weffc++"
@@ -195,6 +196,10 @@ int tcpip::open_file()
         demux.open_flows.push_back(this);
         if(demux.open_flows.size() > demux.max_open_flows) demux.max_open_flows = demux.open_flows.size();
         //std::cerr << "open_file1 " << *this << "\n";
+    }
+    if (rfd < 0) {
+        rfd = demux.retrying_open(flow_pathname,O_RDONLY,0666);
+        DEBUG(5) ("%s: opening existing file", flow_pathname.c_str());
     }
     if(demux.opt.output_packet_index){
     	//Open the file for the flow index.  We don't do this if the flow file could not be
@@ -589,6 +594,32 @@ void tcpip::sort_index(std::fstream *ix_file) {
  */
 void tcpip::sort_index(){
 	tcpip::sort_index(&(this->idx_file));
+}
+
+
+void tcpip::parse_packet() {
+    if (rfd < 0 || seen == NULL || myplugin == NULL)
+        return;
+
+    dump_seen();
+    
+    recon_set::const_iterator it = seen->begin();
+    if (it == seen->end())
+        return;
+
+    //std::cerr << it->upper() << " " << it->lower() << std::endl;  
+    
+    int64_t delta = it->upper() + 1 - rpos;
+
+    if (delta <= 0)
+        return;
+    
+    char* buf = new char[delta];
+    ssize_t ret = read(rfd, buf, delta);
+    assert(ret == delta);
+    rpos += ret;
+    myplugin->process_packet(buf, delta);
+    delete buf;
 }
 
 #pragma GCC diagnostic ignored "-Weffc++"

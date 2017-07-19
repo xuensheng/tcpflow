@@ -14,6 +14,7 @@
 #include "tcpflow.h"
 #include "tcpip.h"
 #include "tcpdemux.h"
+#include "rtmpparser.h"
 
 #include <iostream>
 #include <sstream>
@@ -154,7 +155,13 @@ tcpip *tcpdemux::create_tcpip(const flow_addr &flowa, be13::tcp_seq isn,const be
     /* create space for the new state */
     flow flow(flowa,flow_counter++,pi);
 
-    tcpip *new_tcpip = new tcpip(*this,flow,isn);
+    appplugin *plugin = NULL;
+    if (flowa.dport == 1935) {
+        plugin = new rtmpparser(flowa);
+        plugin->init();
+    }
+
+    tcpip *new_tcpip = new tcpip(*this,flow,isn,plugin);
     new_tcpip->nsn   = isn+1;		// expected sequence number of the first byte
     DEBUG(5) ("new flow %s. path: %s next seq num (nsn):%d",
               flowa.str().c_str(),new_tcpip->flow_pathname.c_str(),new_tcpip->nsn);
@@ -458,7 +465,8 @@ int tcpdemux::process_tcp(const ipaddr &src, const ipaddr &dst,sa_family_t famil
     if (tcp==NULL){
 
         /* Don't process if this is not a SYN and there is no data. */
-        if(syn_set==false && tcp_datalen==0) return 0;
+        // xuensheng if(syn_set==false && tcp_datalen==0) return 0;
+        if(syn_set==false) return 0;
 
 	/* Create a new connection.
 	 * delta will be 0, because it's a new connection!
@@ -515,6 +523,7 @@ int tcpdemux::process_tcp(const ipaddr &src, const ipaddr &dst,sa_family_t famil
 	} else {
 	    if (opt.store_output){
 		tcp->store_packet(tcp_data, tcp_datalen, delta,pi.ts);
+        tcp->parse_packet();
 	    }
 	}
     }

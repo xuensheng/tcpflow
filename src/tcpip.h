@@ -147,6 +147,24 @@ inline std::ostream & operator <<(std::ostream &os,const flow_addr &f)  {
     return os;
 }
 
+class appplugin {
+public:
+
+    appplugin(const flow_addr &flow_addr_):addr(flow_addr_) {}
+
+    virtual ~appplugin() {}
+
+    virtual int init() {
+        return 0;
+    }
+
+    virtual int process_packet(const char* buf, size_t size) {
+        return 0;
+    }
+
+    class flow_addr addr;
+};
+
 
 /*
  * A flow is a flow_addr that has additional information regarding when it was seen
@@ -281,10 +299,11 @@ private:
     /*** End Effective C++ error suppression */
 
 public:;
-    tcpip(class tcpdemux &demux_,const flow &flow_,be13::tcp_seq isn_);    /* constructor in tcpip.cpp */
+    tcpip(class tcpdemux &demux_,const flow &flow_,be13::tcp_seq isn_, appplugin *myplugin);    /* constructor in tcpip.cpp */
     virtual ~tcpip();			// destructor
 
     class tcpdemux &demux;		// our demultiplexer
+    appplugin *myplugin;
 
     /* State information for the flow being reconstructed */
     flow	myflow;			/* Description of this flow */
@@ -295,10 +314,12 @@ public:;
     uint32_t    fin_count;              // number of FINs received
     uint32_t    fin_size;               // length of stream as determined when fin is sent
     uint64_t	pos;			// fd - current position+1 (next byte in stream to be written)
+    uint64_t rpos;
 
     /* Archiving information */
     std::string flow_pathname;		// path where flow is saved
     int		fd;			// file descriptor for file storing this flow's data 
+    int		rfd;	    // file descriptor for file storing this flow's data 
     bool	file_created;		// true if file was created
 
     /* Flow Index information - only used if flow packet/data indexing is requested --GDD */
@@ -320,6 +341,7 @@ public:;
     int  open_file();                   // opens save file; return -1 if failure, 0 if success
     void print_packet(const u_char *data, uint32_t length);
     void store_packet(const u_char *data, uint32_t length, int32_t delta,struct timeval ts);
+    void parse_packet();
     void process_packet(const struct timeval &ts,const int32_t delta,const u_char *data,const uint32_t length);
     uint32_t seen_bytes();
     void dump_seen();

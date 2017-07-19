@@ -348,7 +348,9 @@ static void process_infile(const std::string &expression,const char *device,cons
 
     /* install the filter expression in libpcap */
     struct bpf_program	fcode;
-    if (pcap_compile(pd, &fcode, expression.c_str(), 1, 0) < 0){
+    char str[256];
+    strcpy(str, expression.c_str());
+    if (pcap_compile(pd, &fcode, str, 1, 0) < 0){
 	die("%s", pcap_geterr(pd));
     }
 
