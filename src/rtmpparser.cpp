@@ -41,6 +41,8 @@ int rtmpparser::send_data(const char* buf, size_t size)
     int ret;
     int left = size;
 
+    std::cerr << "send_data: " << size << std::endl;
+
     char recv_buf[16*1024];
     do {
         ret = recv(sockfd, recv_buf, 16 * 1024, MSG_DONTWAIT);
@@ -133,6 +135,18 @@ static uint32_t AV_RB32(const uint8_t *p)
     return (p[0] << 24)  + (p[1] << 16) + (p[2] << 8) + p[3];
 }
 
+static void AV_WB16(uint8_t *p, uint16_t v)
+{
+    p[0] = v >> 8;
+    p[1] = v & 0xff;
+}
+
+static void AV_WB24(uint8_t *p, uint32_t v)
+{
+    p[0] = v >> 16;
+    p[1] = (v >> 8) & 0xff;
+    p[2] = v & 0xff;
+}
 
 #define DEF(type, name, bytes, read)                                           \
 static type bytestream_get_ ## name(const uint8_t **b)        \
@@ -239,19 +253,30 @@ int ff_amf_get_field_value(const uint8_t *data, const uint8_t *data_end,
 
 const char* gen_publish_url()
 {
-    return "";
+    char* url = new char[1024];
+    strcpy(url, "test_rtmp_live_1500451501?OSSAccessKeyId=LTAIdrzDuhBJeJfA&playlistName=test.m3u8&Expires=1500811501&Signature=YdNg2SykcKEclAwljWh9Da8kiXg%3D");
+    return url;
 }
 
 char* replace_buf(const char* buf, int buf_size, const char* org, int org_size, const char* to, int to_size)
 {
-    char* new_buf = new char[buf_size + to_size];
+    int new_size = buf_size + to_size;
+    char* new_buf = new char[new_size];
 
     std::cerr << "replace: " << org << " to " << to << std::endl;
 
+    int front = org - buf;
+    int mid = org_size;
+    int back = buf_size - front - mid;
+
+    std::cerr << front << " " << mid << " " << back << std::endl;
+
+    assert(front > 0 && front <= buf_size);
+
     int len = org - buf;
-    memcpy(new_buf, buf, len);
-    memcpy(new_buf + len, to, to_size);
-    memcpy(new_buf + len + to_size, org + org_size, buf_size - len - org_size);
+    memcpy(new_buf, buf, front);
+    memcpy(new_buf + front, to, to_size);
+    memcpy(new_buf + front + to_size, org + org_size, back);
     
     return new_buf;
 }
@@ -358,7 +383,7 @@ int rtmpparser::process_packet(const char* buf, size_t size)
         if (payload_size < body_size) {
             rtmp_header* head2 = (rtmp_header *)&pkt_buf[pkt_buf_size - 1];
             int header_size2 = get_header_size(head2->type);
-            assert(header_size2 == 1);
+            //assert(header_size2 == 1);
             int left = body_size - payload_size;
             if (left <= 128) {
                 expect_pkt_buf_size += (header_size2 - 1) + left;
@@ -378,97 +403,141 @@ int rtmpparser::process_packet(const char* buf, size_t size)
 
 }
 
-int rtmpparser::parse_packet(const char* buf, size_t size)
+int convert_to_payload_buf(const char* buf, int size, char** payload_buf, int* payload_size)
+{
+    int pos = 0;
+    int new_size = 0;
+    char* new_buf = new char[size];
+    rtmp_header* head = (rtmp_header *)(buf + pos);
+    int total_body_size = AV_RB24(head->amf_size);
+
+    do {
+        head = (rtmp_header *)(buf + pos);
+        int header_size = get_header_size(head->type);
+        int body_size = min(total_body_size - new_size, 128);
+        pos += header_size;
+        memcpy(new_buf + new_size, buf + pos, body_size);
+        pos += body_size;
+        new_size += body_size;
+    } while(pos <= size);
+
+    *payload_buf = new_buf;
+    *payload_size = new_size;
+
+    return 0;
+}
+
+void rtmpparser::send_pkt(const char* pkt_buf, int pkt_buf_size, const char* payload_buf, int payload_buf_size)
+{
+    char* new_pkt_buf = new char[pkt_buf_size + 1024];
+    int new_pkt_buf_size = 0;
+    rtmp_header* head = (rtmp_header *)pkt_buf;
+    int header_size = get_header_size(head->type);
+
+    memcpy(new_pkt_buf, pkt_buf, header_size);
+    new_pkt_buf_size += header_size;
+    char chunk_header = pkt_buf[0] | 0xc0;
+    do {
+        int send_size = min(payload_buf_size, 128);
+        memcpy(new_pkt_buf + new_pkt_buf_size, payload_buf, send_size);
+        payload_buf_size -= send_size;
+        new_pkt_buf_size += send_size;
+        payload_buf += send_size;
+        if (payload_buf_size > 0) {
+            memcpy(new_pkt_buf + new_pkt_buf_size, &chunk_header, 1);
+            new_pkt_buf_size++;
+        }
+    } while(payload_buf_size > 0);
+
+    if (pkt_buf_size != new_pkt_buf_size)
+        abort();
+
+    if (memcmp(pkt_buf, new_pkt_buf, new_pkt_buf_size) != 0)
+        abort();
+    
+    send_data(new_pkt_buf, new_pkt_buf_size);
+
+    delete new_pkt_buf;
+}
+
+int rtmpparser::parse_packet(char* buf, size_t size)
 {
 
     rtmp_header* head = (rtmp_header *)buf;
-    int fmt = (head->type & 0xc0) >> 6;
     int header_size = get_header_size(head->type);
     
     int amf_type = head->amf_type;
     int amf_size = (head->amf_size[0] << 16) + (head->amf_size[1] << 8) + head->amf_size[2];
 
     std::cerr << "header_size: " << header_size << " type: " << amf_type << " body size: " << amf_size << std::endl;
-    send_data(buf, size);
 
-    return 0;
+    if (amf_type != 0x14) {
+        send_data(buf, size);
+        return 0;
+    }
     
-    if (amf_type == 0x14) { //invoke
-        const char* pos = memstr(buf, size, "tcUrl");
-        if (pos != NULL) {
-            //rewrite tcurl
-            std::cerr << "pos: " << pos << std::endl;
-            pos = pos + strlen("tcUrl");
-            assert(pos[0] == 0x02);//type string
-            pos++;
-            int url_size = (pos[0] << 8) + pos[1];
-            
-            char* new_buf = replace_buf(buf, size, pos + 2, url_size, CONNECT_URL, CONNECT_URL_SIZE);
-            int new_size = size - url_size + CONNECT_URL_SIZE;
+    char *payload_buf = NULL;
+    int payload_buf_size = 0;
+    convert_to_payload_buf(buf, size, &payload_buf, &payload_buf_size);
 
-            head = (rtmp_header *)new_buf;
+    std::cerr << "payload_buf_size: " << payload_buf_size << std::endl;
+    const char* pos = memstr(payload_buf, payload_buf_size, "tcUrl");
+    if (pos != NULL) {
+        //rewrite tcurl
+        std::cerr << "pos: " << pos << std::endl;
+        pos = pos + strlen("tcUrl");
+        assert(pos[0] == 0x02);//type string
+        pos++;
+        int url_size = AV_RB16((uint8_t*)pos);
+        
+        char* new_payload_buf = replace_buf(payload_buf, payload_buf_size, pos + 2, url_size, CONNECT_URL, CONNECT_URL_SIZE);
+        int new_payload_size = payload_buf_size - url_size + CONNECT_URL_SIZE;
 
-            head->amf_size[0] = size >> 16;
-            head->amf_size[1] = (size >> 8) & 0xff;
-            head->amf_size[2] = size & 0xff;
-            
-            char* new_pos = new_buf + (pos - buf);
-            new_pos[0] = CONNECT_URL_SIZE >> 8;
-            new_pos[1] = CONNECT_URL_SIZE & 0xff;
+        AV_WB24((uint8_t*)head->amf_size, new_payload_size);
+        AV_WB16((uint8_t*)new_payload_buf + (pos - payload_buf), CONNECT_URL_SIZE);
 
-            send_data(new_buf, new_size);
-            delete new_buf;
-            return 0;
+        send_pkt(buf, size, new_payload_buf, new_payload_size);
+        delete new_payload_buf; 
+        return 0;
+    }
+    
+    pos = memstr(payload_buf, payload_buf_size, "publish");
+    if (pos != NULL) {
+        //rewrite publish channel
+        pos += strlen("publish") + 10;
+        assert(pos[0] == 0x02);//type string
+        pos++;
+        int url_size = AV_RB16((uint8_t*)pos);
+
+        const char* publish_url = gen_publish_url();
+        int publish_url_size = strlen(publish_url);
+
+        char* new_payload_buf = replace_buf(payload_buf, payload_buf_size, pos + 2, url_size, publish_url, publish_url_size);
+        int new_payload_size = payload_buf_size - url_size + publish_url_size;
+
+        AV_WB24((uint8_t*)head->amf_size, new_payload_size);
+        AV_WB16((uint8_t*)new_payload_buf + (pos - payload_buf), publish_url_size);
+
+        send_pkt(buf, size, new_payload_buf, new_payload_size);
+        delete new_payload_buf; 
+        return 0;
+
+        char* recv_buf;
+        int recv_size = 0;
+        recv_data(&recv_buf, &recv_size, 2);
+        if (recv_size > 0) {
+            char code_buf[1024];
+            ff_amf_get_field_value((const uint8_t*)recv_buf,
+                                   (const uint8_t*)(recv_buf + recv_size),
+                                   (const uint8_t*)"code",
+                                   (uint8_t*)code_buf,
+                                   sizeof(code_buf));  
+            std::cerr << "code: " << code_buf << std::endl;
         }
         
-        pos = memstr(buf, size, "publish");
-        if (pos != NULL) {
-            //rewrite publish channel
-            std::cerr << "pos-publish: " << pos << std::endl;
-            pos = pos + strlen("publish") + 10;
-            assert(pos[0] == 0x02);//type string
-            pos++;
-            int url_size = (pos[0] << 8) + pos[1];
-
-            const char* publish_url = gen_publish_url();
-            int publish_url_size = strlen(publish_url);
-
-            char* new_buf = replace_buf(buf, size, pos + 2, url_size, publish_url, publish_url_size);
-            int new_size = size - url_size + publish_url_size;
-
-            head = (rtmp_header *)new_buf;
-
-            head->amf_size[0] = size >> 16;
-            head->amf_size[1] = (size >> 8) & 0xff;
-            head->amf_size[2] = size & 0xff;
-
-            char* new_pos = new_buf + (pos - buf);
-            new_pos[0] = publish_url_size >> 8;
-            new_pos[1] = publish_url_size & 0xff;
-
-            buf = new_buf;
-            size = new_size;
-            
-            send_data(new_buf, new_size);
-            delete new_buf;
-
-            char* recv_buf;
-            int recv_size = 0;
-            recv_data(&recv_buf, &recv_size, 2);
-            if (recv_size > 0) {
-                char code_buf[1024];
-                ff_amf_get_field_value((const uint8_t*)recv_buf,
-                                       (const uint8_t*)(recv_buf + recv_size),
-                                       (const uint8_t*)"code",
-                                       (uint8_t*)code_buf,
-                                       sizeof(code_buf));  
-                std::cerr << "code: " << code_buf << std::endl;
-            }
-            return 0;
-        }
+        return 0;
     }
 
     send_data(buf, size);
-
     return 0;
 }

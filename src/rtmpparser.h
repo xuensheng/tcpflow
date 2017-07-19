@@ -11,6 +11,7 @@ public:
     {
         flowinfo = addr.str();
         pkt_buf = (char*)malloc(128*1024);
+        payload_buf = (char*)malloc(128*1024);
         pkt_buf_size = 0;
         pkt_buf_max_size = 1024 * 128;
         expect_pkt_buf_size = 1;
@@ -30,8 +31,8 @@ public:
 private:
     int send_data(const char* buf, size_t size);
     int recv_data(char** buf, int* size, int wait);
-    int parse_packet(const char* buf, size_t size);
-
+    int parse_packet(char* buf, size_t size);
+    void send_pkt(const char* pkt_buf, int pkt_buf_size, const char* payload_buf, int payload_buf_size);
 
 private:
 
@@ -39,6 +40,7 @@ private:
     int sockfd;
     int processed_size;
     char* pkt_buf;
+    char* payload_buf;
     int pkt_buf_size;
     int pkt_buf_max_size;
     int expect_pkt_buf_size;
