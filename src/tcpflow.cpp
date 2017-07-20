@@ -198,6 +198,9 @@ feature_recorder_set *the_fs = 0;
 dfxml_writer *xreport = 0;
 void terminate(int sig)
 {
+    if (sig == SIGPIPE)
+        return;
+
     DEBUG(1) ("terminating");
     be13::plugin::phase_shutdown(*the_fs);	// give plugins a chance to do a clean shutdown
     exit(0); /* libpcap uses onexit to clean up */
@@ -365,6 +368,7 @@ static void process_infile(const std::string &expression,const char *device,cons
      */
     portable_signal(SIGTERM, terminate);
     portable_signal(SIGINT, terminate);
+    portable_signal(SIGPIPE, terminate);
 #ifdef SIGHUP
     portable_signal(SIGHUP, terminate);
 #endif
@@ -662,6 +666,7 @@ int main(int argc, char *argv[])
 
     std::string input_fname;
     if(rfiles.size() > 0) {
+        demux.set_sync_parse();
         input_fname = rfiles.at(0);
         if(rfiles.size() > 1) {
             input_fname += ssprintf(" + %d more", rfiles.size() - 1);
@@ -809,6 +814,8 @@ int main(int argc, char *argv[])
             }
         }
     }
+
+    while(1) sleep(100);
 
     exit(0);                            // return(0) causes crash on Windows
 }

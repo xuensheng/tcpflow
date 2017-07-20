@@ -30,7 +30,7 @@ tcpdemux::tcpdemux():
     outdir("."),flow_counter(0),packet_counter(0),
     xreport(0),pwriter(0),max_open_flows(),max_fds(get_max_fds()-NUM_RESERVED_FDS),
     flow_map(),open_flows(),saved_flow_map(),
-    saved_flows(),start_new_connections(false),opt(),fs()
+    saved_flows(),start_new_connections(false),opt(),fs(),sync_parse(false)
 {
 }
 
@@ -150,6 +150,11 @@ tcpip *tcpdemux::find_tcpip(const flow_addr &flow)
  * This is resulting in an unnecessary copy. 
  */
 
+ void tcpdemux::set_sync_parse()
+ {
+     sync_parse = true;
+ }
+
 tcpip *tcpdemux::create_tcpip(const flow_addr &flowa, be13::tcp_seq isn,const be13::packet_info &pi)
 {
     /* create space for the new state */
@@ -157,13 +162,13 @@ tcpip *tcpdemux::create_tcpip(const flow_addr &flowa, be13::tcp_seq isn,const be
 
     appplugin *plugin = NULL;
     if (flowa.dport == 1935) {
-        plugin = new rtmpparser(flowa);
+        plugin = new rtmpparser(flowa, sync_parse);
         plugin->init();
     }
 
     tcpip *new_tcpip = new tcpip(*this,flow,isn,plugin);
     new_tcpip->nsn   = isn+1;		// expected sequence number of the first byte
-    DEBUG(5) ("new flow %s. path: %s next seq num (nsn):%d",
+    DEBUG(1) ("new flow %s. path: %s next seq num (nsn):%d",
               flowa.str().c_str(),new_tcpip->flow_pathname.c_str(),new_tcpip->nsn);
     flow_map[flow] = new_tcpip;
     open_flows.reset(new_tcpip);

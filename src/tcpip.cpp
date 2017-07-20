@@ -103,7 +103,7 @@ tcpip::~tcpip()
 {
     assert(fd<0);                       // file must be closed
     if(seen) delete seen;
-    if(myplugin) delete myplugin;
+    if(myplugin) myplugin->destroy();
 }
 
 #pragma GCC diagnostic warning "-Weffc++"
@@ -601,7 +601,7 @@ void tcpip::parse_packet() {
     if (rfd < 0 || seen == NULL || myplugin == NULL)
         return;
 
-    dump_seen();
+    //dump_seen();
     
     recon_set::const_iterator it = seen->begin();
     if (it == seen->end())

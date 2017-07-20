@@ -150,19 +150,24 @@ inline std::ostream & operator <<(std::ostream &os,const flow_addr &f)  {
 class appplugin {
 public:
 
-    appplugin(const flow_addr &flow_addr_):addr(flow_addr_) {}
+    appplugin(const flow_addr &flow_addr_, bool sync_):addr(flow_addr_), sync(sync_) {}
 
     virtual ~appplugin() {}
 
     virtual int init() {
         return 0;
     }
+    
+    virtual void destroy() {
+    }
+
 
     virtual int process_packet(const char* buf, size_t size) {
         return 0;
     }
 
     class flow_addr addr;
+    bool sync;
 };
 
 

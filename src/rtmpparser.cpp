@@ -3,37 +3,87 @@
 #include "rtmpparser.h"
 
 #include <iostream>
-#include<stdlib.h>
-#include<stdio.h>
-#include<string.h>
-#include<netdb.h>
-#include<sys/types.h>
-#include<netinet/in.h>
-#include<sys/socket.h>
-#include<unistd.h>
-#include<arpa/inet.h>
-#include<errno.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <netdb.h>
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <errno.h>
 
+void* process_packet_worker(void* args)
+{
+    rtmpparser* parser = (rtmpparser*)args;
+
+    parser->main_loop();
+
+    delete parser;
+}
 
 int rtmpparser::init()
 {
     if((sockfd = socket(AF_INET,SOCK_STREAM,0)) == -1) {
-        std::cerr << "Socket Error: " << strerror(errno) << std::endl;
+	    DEBUG(1)("unable to open socket, error: %s", strerror(errno));
         return -1;
     }
 
     struct sockaddr_in server_addr;
     bzero(&server_addr,sizeof(server_addr));
     server_addr.sin_family=AF_INET;
-    server_addr.sin_port=htons(1935);
+    server_addr.sin_port=htons(5391);
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     if(connect(sockfd, (struct sockaddr *)(&server_addr), sizeof(struct sockaddr)) == -1) {
-        std::cerr << "Connect Error: " << strerror(errno) << std::endl;
+	    DEBUG(1)("unable to connect socket, error: %s", strerror(errno));
         return -1;
     }
 
+    running = true;
+
+    if(!sync) {
+        pthread_t thread;
+        pthread_create(&thread, NULL, process_packet_worker, this);
+    }
+
     return 0;
+}
+void rtmpparser::destroy()
+{
+	DEBUG(1)("stream closed");
+
+    running = false;
+
+    if (sync) {
+        delete this;
+    }
+}
+
+void rtmpparser::main_loop()
+{
+    rtmppkt pkt;
+    while(1)
+    {
+        pthread_mutex_lock(&lock);
+        if (pkt_list.empty()) {
+            pthread_mutex_unlock(&lock);
+            if (!running) {
+                break;
+            }
+            usleep(20 * 1000);
+            continue;
+        }
+
+        pkt = pkt_list.back();
+        pkt_list.pop_back();
+        pthread_mutex_unlock(&lock);
+        
+        do_process(pkt.buf, pkt.size);
+        delete pkt.buf;
+    }
+	DEBUG(1)("end process");
 }
 
 int rtmpparser::send_data(const char* buf, size_t size)
@@ -41,8 +91,7 @@ int rtmpparser::send_data(const char* buf, size_t size)
     int ret;
     int left = size;
 
-    std::cerr << "send_data: " << size << std::endl;
-
+    //clear recv buf
     char recv_buf[16*1024];
     do {
         ret = recv(sockfd, recv_buf, 16 * 1024, MSG_DONTWAIT);
@@ -65,6 +114,9 @@ int rtmpparser::send_data(const char* buf, size_t size)
 
         left -= ret;
     }
+    DEBUG(1)("send pkt size: %d ", size); 
+    //rate: 1MB/s
+    usleep(size);
     return 0;
 }
 
@@ -100,9 +152,6 @@ struct rtmp_header {
     unsigned char amf_type;
     unsigned char stream_id[4];
 };
-
-#define CONNECT_URL "rtmp://xes-test-live-channel.oss-test.aliyun-inc.com:1935/live"
-#define CONNECT_URL_SIZE (strlen(CONNECT_URL))
 
 typedef enum {                       
     AMF_DATA_TYPE_NUMBER      = 0x00,
@@ -251,11 +300,67 @@ int ff_amf_get_field_value(const uint8_t *data, const uint8_t *data_end,
     return -1;
 }
 
-const char* gen_publish_url()
+std::string gen_publish_url()
 {
-    char* url = new char[1024];
-    strcpy(url, "test_rtmp_live_1500451501?OSSAccessKeyId=LTAIdrzDuhBJeJfA&playlistName=test.m3u8&Expires=1500811501&Signature=YdNg2SykcKEclAwljWh9Da8kiXg%3D");
-    return url;
+    int fd;
+
+    if((fd = socket(AF_INET,SOCK_STREAM,0)) == -1) {
+	    DEBUG(1)("unable to open socket, error: %s", strerror(errno));
+        return "";
+    }
+
+    struct sockaddr_in server_addr;
+    bzero(&server_addr,sizeof(server_addr));
+    server_addr.sin_family=AF_INET;
+    server_addr.sin_port=htons(7123);
+    server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    if(connect(fd, (struct sockaddr *)(&server_addr), sizeof(struct sockaddr)) == -1) {
+	    DEBUG(1)("unable to connect socket, error: %s", strerror(errno));
+        return "";
+    }
+    
+    char request[] = 
+        "GET /publishurl HTTP/1.1\n"
+        "Host: 127.0.0.1\n"
+        "User-Agent: tcpflow\n"
+        "Accept: */*\n"
+        "\r\n\r\n";
+
+    DEBUG(1)("request:\n%s", request);
+
+    int ret = write(fd, request, strlen(request));
+    if (ret != strlen(request)) {
+        close(fd);
+        return "";
+    }
+
+    char response[1024] = { 0 };
+    int size = 0;
+    do {
+        ret = recv(fd, response + size, sizeof(response) - size, 0);
+        if (ret < 0) break;
+        char* pos = strstr(response, "\r\n\r\n");
+        if (pos != NULL) {
+            if (strstr(response, "200 OK") == NULL)
+                break;
+
+            if (strstr(response, "rtmp") != NULL)
+                break;
+        }
+        size += ret;
+    }while(ret >= 0);
+
+    close(fd);
+
+    DEBUG(1)("response:\n%s", response);
+
+    char* pos = strstr(response, "rtmp");
+    if (pos == NULL || strlen(pos) == 0) {
+        return "";
+    }
+
+    return (pos);
 }
 
 char* replace_buf(const char* buf, int buf_size, const char* org, int org_size, const char* to, int to_size)
@@ -263,13 +368,11 @@ char* replace_buf(const char* buf, int buf_size, const char* org, int org_size, 
     int new_size = buf_size + to_size;
     char* new_buf = new char[new_size];
 
-    std::cerr << "replace: " << org << " to " << to << std::endl;
+    DEBUG(1)("replace: %s to %s", org, to);
 
     int front = org - buf;
     int mid = org_size;
     int back = buf_size - front - mid;
-
-    std::cerr << front << " " << mid << " " << back << std::endl;
 
     assert(front > 0 && front <= buf_size);
 
@@ -277,7 +380,7 @@ char* replace_buf(const char* buf, int buf_size, const char* org, int org_size, 
     memcpy(new_buf, buf, front);
     memcpy(new_buf + front, to, to_size);
     memcpy(new_buf + front + to_size, org + org_size, back);
-    
+
     return new_buf;
 }
 
@@ -297,8 +400,6 @@ int get_header_size(unsigned char type)
     int fmt = (type & 0xc0) >> 6;
     int header_size;
 
-    std::cerr << "head " << fmt << " " << (int)type << std::endl;
-
     if (fmt == 0)
         header_size = 12;
     else if (fmt == 1)
@@ -316,15 +417,45 @@ int rtmpparser::process_packet(const char* buf, size_t size)
     if (sockfd < 0 || size < 1)
         return -1;
 
+    DEBUG(1)("capture pkt size: %d", size);
+
+    if(sync) {
+        do_process(buf, size);
+    } else {
+        char* new_buf = new char[size];
+        memcpy(new_buf, buf, size);
+
+        rtmppkt pkt;
+        pkt.buf = new_buf;
+        pkt.size = size;
+
+        pthread_mutex_lock(&lock);
+        pkt_list.push_front(pkt);
+        pthread_mutex_unlock(&lock);
+    }
+}
+
+int rtmpparser::do_process(const char* buf, size_t size)
+{
+    if (sockfd < 0 || size < 1)
+        return -1;
+
+    DEBUG(1)("process pkt size: %d", size);
+
     const char* orgbuf = buf;
 
-    std::cerr << flowinfo << "recv pkt, size: " << size << " total processed: " << processed_size << "\n";
-    
     if (processed_size < 3073) {
         send_data(buf, size);
         processed_size += size;
         return 0;
     }
+
+    if (status >= RTMP_PUBLISH) {
+        send_data(buf, size);
+        return 0;
+    }
+
+    DEBUG(1)("process pkt size2: %d", size);
 
     while(size > 0) {
         if (expect_pkt_buf_size > pkt_buf_max_size) {
@@ -332,13 +463,15 @@ int rtmpparser::process_packet(const char* buf, size_t size)
             pkt_buf_max_size = expect_pkt_buf_size;
         }
 
+        DEBUG(1)("expect_pkt_buf_size: %d pkt_buf_size: %d",
+            expect_pkt_buf_size, pkt_buf_size);
+
         int copy_size = min(expect_pkt_buf_size - pkt_buf_size, size);
         memcpy(pkt_buf + pkt_buf_size, buf, copy_size);
         int parsed = buf - orgbuf;
         buf += copy_size;
         size -= copy_size;
         pkt_buf_size += copy_size;
-        std::cerr << "copy from " << parsed << " size " << copy_size << " left " << size << std::endl;
 
         if(pkt_buf_size < expect_pkt_buf_size) {
             continue;
@@ -350,11 +483,8 @@ int rtmpparser::process_packet(const char* buf, size_t size)
         int header_size = get_header_size(head->type);
         int body_size = 0;
 
-        std::cerr << "pkt_buf_size: " << pkt_buf_size << " expect_pkt_buf_size " << expect_pkt_buf_size  << " header_size " << header_size << std::endl;
-
         if (pkt_buf_size < header_size) {
             expect_pkt_buf_size = header_size;
-            std::cerr << "wait recv header, head_size: " << header_size << std::endl;
             continue;
         }
         
@@ -367,6 +497,7 @@ int rtmpparser::process_packet(const char* buf, size_t size)
 
         body_size = AV_RB24(head->amf_size);
         if (header_size >= 8 && pkt_buf_size == header_size) {
+            DEBUG(1)("process pkt body size: %d", body_size);
             if (body_size <= 128) {
                 expect_pkt_buf_size = header_size + body_size;
                 payload_size = body_size;
@@ -375,8 +506,6 @@ int rtmpparser::process_packet(const char* buf, size_t size)
                 payload_size = 128;
             }
 
-            std::cerr << "wait recv body, head_size: " << header_size << " body_size: " << body_size << std::endl;
-            std::cerr << "body size: " << body_size << " payload size: " << payload_size << std::endl;
             continue;
         }
         
@@ -391,13 +520,18 @@ int rtmpparser::process_packet(const char* buf, size_t size)
                 expect_pkt_buf_size += (header_size2 - 1) + 128 + 1;
             }
             payload_size += min(left, 128);
-            std::cerr << "body size: " << body_size << " payload size: " << payload_size << std::endl;
             continue;
         } else {
             parse_packet(pkt_buf, pkt_buf_size);
             processed_size += pkt_buf_size;
             pkt_buf_size = 0;
             expect_pkt_buf_size = 1;
+            if (status >= RTMP_PUBLISH) {
+                if (size > 0)
+                    send_data(buf, size);
+                return 0;
+            }
+
         }
     }
 
@@ -449,15 +583,30 @@ void rtmpparser::send_pkt(const char* pkt_buf, int pkt_buf_size, const char* pay
         }
     } while(payload_buf_size > 0);
 
-    if (pkt_buf_size != new_pkt_buf_size)
+/*
+    if (new_pkt_buf_size != pkt_buf_size)
         abort();
 
     if (memcmp(pkt_buf, new_pkt_buf, new_pkt_buf_size) != 0)
         abort();
-    
+*/
     send_data(new_pkt_buf, new_pkt_buf_size);
 
     delete new_pkt_buf;
+}
+
+struct amf_string {
+    unsigned char type;
+    unsigned char size[2];
+    char str[0];
+};
+
+bool check_cmd(const char* buf, const char* cmd)
+{
+    const amf_string* amf_str = (const amf_string *)buf;
+    return (amf_str->type == 0x02
+        && AV_RB16(amf_str->size) == strlen(cmd)
+        && strncmp(amf_str->str, cmd, strlen(cmd)) == 0);
 }
 
 int rtmpparser::parse_packet(char* buf, size_t size)
@@ -469,7 +618,7 @@ int rtmpparser::parse_packet(char* buf, size_t size)
     int amf_type = head->amf_type;
     int amf_size = (head->amf_size[0] << 16) + (head->amf_size[1] << 8) + head->amf_size[2];
 
-    std::cerr << "header_size: " << header_size << " type: " << amf_type << " body size: " << amf_size << std::endl;
+    DEBUG(1)("pkt size: %d amf type: 0x%x body size: %d", size, amf_type, amf_size); 
 
     if (amf_type != 0x14) {
         send_data(buf, size);
@@ -480,64 +629,122 @@ int rtmpparser::parse_packet(char* buf, size_t size)
     int payload_buf_size = 0;
     convert_to_payload_buf(buf, size, &payload_buf, &payload_buf_size);
 
-    std::cerr << "payload_buf_size: " << payload_buf_size << std::endl;
-    const char* pos = memstr(payload_buf, payload_buf_size, "tcUrl");
-    if (pos != NULL) {
-        //rewrite tcurl
-        std::cerr << "pos: " << pos << std::endl;
-        pos = pos + strlen("tcUrl");
-        assert(pos[0] == 0x02);//type string
-        pos++;
-        int url_size = AV_RB16((uint8_t*)pos);
-        
-        char* new_payload_buf = replace_buf(payload_buf, payload_buf_size, pos + 2, url_size, CONNECT_URL, CONNECT_URL_SIZE);
-        int new_payload_size = payload_buf_size - url_size + CONNECT_URL_SIZE;
-
-        AV_WB24((uint8_t*)head->amf_size, new_payload_size);
-        AV_WB16((uint8_t*)new_payload_buf + (pos - payload_buf), CONNECT_URL_SIZE);
-
-        send_pkt(buf, size, new_payload_buf, new_payload_size);
-        delete new_payload_buf; 
-        return 0;
-    }
+    amf_string* amf_str = (amf_string *)(payload_buf + header_size);
     
-    pos = memstr(payload_buf, payload_buf_size, "publish");
-    if (pos != NULL) {
-        //rewrite publish channel
-        pos += strlen("publish") + 10;
-        assert(pos[0] == 0x02);//type string
-        pos++;
-        int url_size = AV_RB16((uint8_t*)pos);
+    if (check_cmd(payload_buf, "connect")) {
+        const char* pos = memstr(payload_buf, payload_buf_size, "tcUrl");
+        if (pos != NULL) {
+            //rewrite tcurl
+            pos = pos + strlen("tcUrl");
+            if(pos[0] != 0x02) {//type string
+                die();
+                DEBUG(1)("unexpect publish msg");
+                delete payload_buf;
+                return 0;
+            }
+            pos++;
+            int url_size = AV_RB16((uint8_t*)pos);
 
-        const char* publish_url = gen_publish_url();
-        int publish_url_size = strlen(publish_url);
+            rtmp_url = gen_publish_url();
+            if (rtmp_url == "") {
+                die();
+                DEBUG(1)("unable to gen publish url");
+                delete payload_buf;
+                return 0;
+            }
 
-        char* new_payload_buf = replace_buf(payload_buf, payload_buf_size, pos + 2, url_size, publish_url, publish_url_size);
-        int new_payload_size = payload_buf_size - url_size + publish_url_size;
+            int end_pos = rtmp_url.find_last_of("/");
+            std::string connect_url = rtmp_url.substr(0, end_pos);
+            //std::string connect_url = "rtmp://xes-test-live-channel.oss-test.aliyun-inc.com:1935/live";
+            int connect_url_size = connect_url.length();
 
-        AV_WB24((uint8_t*)head->amf_size, new_payload_size);
-        AV_WB16((uint8_t*)new_payload_buf + (pos - payload_buf), publish_url_size);
+            char* new_payload_buf = replace_buf(payload_buf, payload_buf_size, pos + 2, url_size, connect_url.c_str(), connect_url_size);
+            int new_payload_size = payload_buf_size - url_size + connect_url_size;
 
-        send_pkt(buf, size, new_payload_buf, new_payload_size);
-        delete new_payload_buf; 
-        return 0;
+            AV_WB24((uint8_t*)head->amf_size, new_payload_size);
+            AV_WB16((uint8_t*)new_payload_buf + (pos - payload_buf), connect_url_size);
 
-        char* recv_buf;
-        int recv_size = 0;
-        recv_data(&recv_buf, &recv_size, 2);
-        if (recv_size > 0) {
-            char code_buf[1024];
-            ff_amf_get_field_value((const uint8_t*)recv_buf,
-                                   (const uint8_t*)(recv_buf + recv_size),
-                                   (const uint8_t*)"code",
-                                   (uint8_t*)code_buf,
-                                   sizeof(code_buf));  
-            std::cerr << "code: " << code_buf << std::endl;
+            send_pkt(buf, size, new_payload_buf, new_payload_size);
+            delete payload_buf;
+            delete new_payload_buf; 
+
+            status = RTMP_CONNECT;
+            return 0;
         }
-        
+        die();
+        DEBUG(1)("unexpect connect msg");
+        delete payload_buf;
+        return 0;
+    } else if (check_cmd(payload_buf, "publish")) {
+        const char* pos = payload_buf + 3 + strlen("publish") + 10;
+            //rewrite publish channel
+        if (pos[0] == 0x02) {
+            pos++;
+            int url_size = AV_RB16((uint8_t*)pos);
+
+            int start_pos = rtmp_url.find_last_of("/") + 1;
+            std::string publish_url = rtmp_url.substr(start_pos, rtmp_url.length() - start_pos);
+            //std::string publish_url = "test_rtmp_live_1500451501?OSSAccessKeyId=LTAIdrzDuhBJeJfA&playlistName=test.m3u8&Expires=1500811501&Signature=YdNg2SykcKEclAwljWh9Da8kiXg%3D";
+            int publish_url_size = publish_url.length();
+
+            char* new_payload_buf = replace_buf(payload_buf, payload_buf_size, pos + 2, url_size, publish_url.c_str(), publish_url_size);
+            int new_payload_size = payload_buf_size - url_size + publish_url_size;
+
+            AV_WB24((uint8_t*)head->amf_size, new_payload_size);
+            AV_WB16((uint8_t*)new_payload_buf + (pos - payload_buf), publish_url_size);
+
+            recv_data(NULL, NULL, 1);
+            send_pkt(buf, size, new_payload_buf, new_payload_size);
+            delete payload_buf;
+            delete new_payload_buf; 
+
+            char* recv_buf;
+            int recv_size = 0;
+            recv_data(&recv_buf, &recv_size, 1);
+            if (recv_size > 0) {
+                char code_buf[1024];
+                rtmp_header* recv_head = (rtmp_header *)recv_buf;
+                ff_amf_get_field_value((const uint8_t*)(recv_buf + get_header_size(recv_head->type)),
+                        (const uint8_t*)(recv_buf + recv_size),
+                        (const uint8_t*)"code",
+                        (uint8_t*)code_buf,
+                        sizeof(code_buf));  
+                DEBUG(1)("publish response code: %s", code_buf);
+                delete recv_buf;
+                if (strncmp(code_buf, "NetStream.Publish.Start", strlen("NetStream.Publish.Start") != 0)) {
+                    die();
+                    DEBUG(1)("publish failed");
+                    return 0;
+                }
+            } else {
+                    die();
+                    DEBUG(1)("recv publish response failed");
+                    return 0;
+            }
+
+            status = RTMP_PUBLISH;
+            return 0;
+        }
+        die();
+        DEBUG(1)("unexpect publish msg");
+        delete payload_buf;
         return 0;
     }
 
-    send_data(buf, size);
+    delete payload_buf;
+
+    if (status >= RTMP_CONNECT) {
+        send_data(buf, size);
+    } else {
+        die();
+        DEBUG(1)("unexpect msg");
+    }
+
     return 0;
+}
+
+void rtmpparser::die()
+{
+    close(sockfd);
+    sockfd = -1;
 }

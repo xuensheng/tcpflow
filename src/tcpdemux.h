@@ -177,6 +177,11 @@ public:
     int  process_ip4(const be13::packet_info &pi);
     int  process_ip6(const be13::packet_info &pi);
     int  process_pkt(const be13::packet_info &pi);
+
+    void set_sync_parse();
+
+private:
+    bool sync_parse;
 };
 
 
