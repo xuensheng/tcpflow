@@ -470,7 +470,8 @@ int tcpdemux::process_tcp(const ipaddr &src, const ipaddr &dst,sa_family_t famil
     if (tcp==NULL){
 
         /* Don't process if this is not a SYN and there is no data. */
-        // xuensheng if(syn_set==false && tcp_datalen==0) return 0;
+        // xuensheng only support case 1
+        //if(syn_set==false && tcp_datalen==0) return 0;
         if(syn_set==false) return 0;
 
 	/* Create a new connection.

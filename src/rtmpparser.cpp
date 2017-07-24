@@ -13,6 +13,10 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <map>
+#include <curl/curl.h>
+
+using namespace std;
 
 void* process_packet_worker(void* args)
 {
@@ -25,6 +29,7 @@ void* process_packet_worker(void* args)
 
 int rtmpparser::init()
 {
+    //创建socket，用于连接oss_server
     if((sockfd = socket(AF_INET,SOCK_STREAM,0)) == -1) {
 	    DEBUG(1)("unable to open socket, error: %s", strerror(errno));
         return -1;
@@ -43,24 +48,50 @@ int rtmpparser::init()
 
     running = true;
 
-    if(!sync) {
-        pthread_t thread;
-        pthread_create(&thread, NULL, process_packet_worker, this);
-    }
+    //创建线程，用于replay rtmp packets
+    pthread_t thread;
+    pthread_create(&thread, NULL, process_packet_worker, this);
 
     return 0;
 }
+
 void rtmpparser::destroy()
 {
 	DEBUG(1)("stream closed");
 
     running = false;
 
-    if (sync) {
-        delete this;
+}
+
+rtmpparser::~rtmpparser()
+{
+    if (sockfd > 0);
+        close(sockfd);
+
+    if (pkt_buf)
+        free(pkt_buf);
+
+    if (status >= RTMP_PUBLISH) {
+        //等待oss写完文件
+        sleep(5);
+
+        //生成vod播放列表
+        string response;
+        map<string, string> header;
+        char start_time_str[12];
+        sprintf(start_time_str, "%ld", start_time);
+        header["x-oss-start-time"] = start_time_str;
+        header["x-oss-channel-id"] = channel_id;
+        int ret = do_http_request("POST", "http://127.0.0.1:7123/publishurl", header, response);
+        if (ret == 0 && !response.empty())
+            DEBUG(1)("post succeed: %s", response.c_str());
+        else
+            DEBUG(1)("post failed : %s", response.c_str());
+
     }
 }
 
+//worker线程主循环
 void rtmpparser::main_loop()
 {
     rtmppkt pkt;
@@ -86,6 +117,7 @@ void rtmpparser::main_loop()
 	DEBUG(1)("end process");
 }
 
+//发送数据到oss
 int rtmpparser::send_data(const char* buf, size_t size)
 {
     int ret;
@@ -115,11 +147,12 @@ int rtmpparser::send_data(const char* buf, size_t size)
         left -= ret;
     }
     DEBUG(1)("send pkt size: %d ", size); 
-    //rate: 1MB/s
+    //控制发送速率 < 1MB/s
     usleep(size);
     return 0;
 }
 
+//从oss接收数据
 int rtmpparser::recv_data(char** buf, int* size, int wait)
 {
     sleep(wait);
@@ -300,75 +333,73 @@ int ff_amf_get_field_value(const uint8_t *data, const uint8_t *data_end,
     return -1;
 }
 
-std::string gen_publish_url()
+size_t write_data(void * ptr, size_t size, size_t nmemb, void * stream)
 {
-    int fd;
-
-    if((fd = socket(AF_INET,SOCK_STREAM,0)) == -1) {
-	    DEBUG(1)("unable to open socket, error: %s", strerror(errno));
-        return "";
-    }
-
-    struct sockaddr_in server_addr;
-    bzero(&server_addr,sizeof(server_addr));
-    server_addr.sin_family=AF_INET;
-    server_addr.sin_port=htons(7123);
-    server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-
-    if(connect(fd, (struct sockaddr *)(&server_addr), sizeof(struct sockaddr)) == -1) {
-	    DEBUG(1)("unable to connect socket, error: %s", strerror(errno));
-        return "";
-    }
-    
-    char request[] = 
-        "GET /publishurl HTTP/1.1\n"
-        "Host: 127.0.0.1\n"
-        "User-Agent: tcpflow\n"
-        "Accept: */*\n"
-        "\r\n\r\n";
-
-    DEBUG(1)("request:\n%s", request);
-
-    int ret = write(fd, request, strlen(request));
-    if (ret != strlen(request)) {
-        close(fd);
-        return "";
-    }
-
-    char response[1024] = { 0 };
-    int size = 0;
-    do {
-        ret = recv(fd, response + size, sizeof(response) - size, 0);
-        if (ret < 0) break;
-        char* pos = strstr(response, "\r\n\r\n");
-        if (pos != NULL) {
-            if (strstr(response, "200 OK") == NULL)
-                break;
-
-            if (strstr(response, "rtmp") != NULL)
-                break;
-        }
-        size += ret;
-    }while(ret >= 0);
-
-    close(fd);
-
-    DEBUG(1)("response:\n%s", response);
-
-    char* pos = strstr(response, "rtmp");
-    if (pos == NULL || strlen(pos) == 0) {
-        return "";
-    }
-
-    return (pos);
+    memcpy(stream, ptr, size * nmemb);
+    return size * nmemb;
 }
 
-char* replace_buf(const char* buf, int buf_size, const char* org, int org_size, const char* to, int to_size)
+//发送http请求，创建livechannel生成推流地址或者生成播放列表
+int rtmpparser::do_http_request(const string& method, const string& url, map<string, string>& header, string& response)
+{  
+    CURL * curl;
+
+    char buff[2048];
+    memset(buff, 0, sizeof(buff));
+
+    curl_global_init(CURL_GLOBAL_ALL);
+
+    curl = curl_easy_init();
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20);
+
+    if(method == "POST") {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "postvodlist"); 
+    }
+
+    struct curl_slist *headers = NULL;
+    for(map<string, string>::iterator it = header.begin(); it != header.end(); ++it) {
+        string headstr = it->first + ": " + it->second;
+        headers = curl_slist_append(headers, headstr.c_str());
+    }
+
+    if (headers != NULL)
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buff);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
+
+    curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+
+    printf("\nbuff : %s\n", buff);
+
+    response = buff;
+
+    return 0;
+}
+
+//获取推流地址,格式： rtmp://bucket.endpoint/live/channel_id?xxxxxxxx
+std::string rtmpparser::gen_publish_url()
+{
+    string response;
+    map<string, string> header;
+    int ret = do_http_request("GET", "http://127.0.0.1:7123/publishurl", header, response);
+
+    if (ret == 0)
+        return response;
+
+    return "";
+}
+
+//替换原始的rtmp流
+char* rtmpparser::replace_buf(const char* buf, int buf_size, const char* org, int org_size, const char* to, int to_size)
 {
     int new_size = buf_size + to_size;
     char* new_buf = new char[new_size];
 
-    DEBUG(1)("replace: %s to %s", org, to);
+    DEBUG(1)("%s replace: %s to %s", flowinfo.c_str(), org, to);
 
     int front = org - buf;
     int mid = org_size;
@@ -412,6 +443,7 @@ int get_header_size(unsigned char type)
     return header_size;
 }
 
+//异步/同步处理packets
 int rtmpparser::process_packet(const char* buf, size_t size)
 {
     if (sockfd < 0 || size < 1)
@@ -419,9 +451,7 @@ int rtmpparser::process_packet(const char* buf, size_t size)
 
     DEBUG(1)("capture pkt size: %d", size);
 
-    if(sync) {
-        do_process(buf, size);
-    } else {
+    {
         char* new_buf = new char[size];
         memcpy(new_buf, buf, size);
 
@@ -430,11 +460,19 @@ int rtmpparser::process_packet(const char* buf, size_t size)
         pkt.size = size;
 
         pthread_mutex_lock(&lock);
+        if (sync) {
+            while (pkt_list.size() > 10) {
+                pthread_mutex_unlock(&lock);
+                usleep(1000*10);
+                pthread_mutex_lock(&lock);
+            }
+        }
         pkt_list.push_front(pkt);
         pthread_mutex_unlock(&lock);
     }
 }
 
+//解析packets主逻辑，主要是解析原始的rtmp流
 int rtmpparser::do_process(const char* buf, size_t size)
 {
     if (sockfd < 0 || size < 1)
@@ -444,19 +482,20 @@ int rtmpparser::do_process(const char* buf, size_t size)
 
     const char* orgbuf = buf;
 
+    //握手消息3073大小
     if (processed_size < 3073) {
         send_data(buf, size);
         processed_size += size;
         return 0;
     }
 
+    //pulish成功，直接发送数据，不再解析
     if (status >= RTMP_PUBLISH) {
         send_data(buf, size);
         return 0;
     }
 
-    DEBUG(1)("process pkt size2: %d", size);
-
+    //解析rtmp
     while(size > 0) {
         if (expect_pkt_buf_size > pkt_buf_max_size) {
             pkt_buf = (char*)realloc(pkt_buf, expect_pkt_buf_size);
@@ -496,6 +535,8 @@ int rtmpparser::do_process(const char* buf, size_t size)
         }
 
         body_size = AV_RB24(head->amf_size);
+
+        //接收到rtmp header
         if (header_size >= 8 && pkt_buf_size == header_size) {
             DEBUG(1)("process pkt body size: %d", body_size);
             if (body_size <= 128) {
@@ -510,9 +551,10 @@ int rtmpparser::do_process(const char* buf, size_t size)
         }
         
         if (payload_size < body_size) {
+            //解析下一个chunk header
             rtmp_header* head2 = (rtmp_header *)&pkt_buf[pkt_buf_size - 1];
             int header_size2 = get_header_size(head2->type);
-            //assert(header_size2 == 1);
+            assert(header_size2 == 1);
             int left = body_size - payload_size;
             if (left <= 128) {
                 expect_pkt_buf_size += (header_size2 - 1) + left;
@@ -522,6 +564,7 @@ int rtmpparser::do_process(const char* buf, size_t size)
             payload_size += min(left, 128);
             continue;
         } else {
+            //解析完一个message
             parse_packet(pkt_buf, pkt_buf_size);
             processed_size += pkt_buf_size;
             pkt_buf_size = 0;
@@ -531,13 +574,12 @@ int rtmpparser::do_process(const char* buf, size_t size)
                     send_data(buf, size);
                 return 0;
             }
-
         }
     }
-
 }
 
-int convert_to_payload_buf(const char* buf, int size, char** payload_buf, int* payload_size)
+//packet buf 转换为 payload buf
+int rtmpparser::convert_to_payload_buf(const char* buf, int size, char** payload_buf, int* payload_size)
 {
     int pos = 0;
     int new_size = 0;
@@ -655,6 +697,7 @@ int rtmpparser::parse_packet(char* buf, size_t size)
 
             int end_pos = rtmp_url.find_last_of("/");
             std::string connect_url = rtmp_url.substr(0, end_pos);
+            channel_id = rtmp_url.substr(end_pos + 1, rtmp_url.find("?") - end_pos - 1);
             //std::string connect_url = "rtmp://xes-test-live-channel.oss-test.aliyun-inc.com:1935/live";
             int connect_url_size = connect_url.length();
 
@@ -721,7 +764,8 @@ int rtmpparser::parse_packet(char* buf, size_t size)
                     DEBUG(1)("recv publish response failed");
                     return 0;
             }
-
+            
+            start_time = time(NULL);
             status = RTMP_PUBLISH;
             return 0;
         }

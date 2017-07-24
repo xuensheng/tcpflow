@@ -2,6 +2,10 @@
 #define RTMP_FLOW_H
 #include <pthread.h>
 #include <list>
+#include <map>
+#include <time.h>
+
+using namespace std;
 
 struct rtmppkt
 {
@@ -35,11 +39,7 @@ public:
         status = RTMP_HANDSHAKE;
     }
 
-    ~rtmpparser()
-    {
-        close(sockfd);
-        free(pkt_buf);
-    }
+    ~rtmpparser();
     
     virtual int init();
 
@@ -56,6 +56,10 @@ private:
     int parse_packet(char* buf, size_t size);
     void send_pkt(const char* pkt_buf, int pkt_buf_size, const char* payload_buf, int payload_buf_size);
     void die();
+    int do_http_request(const std::string& method, const std::string& url, std::map<string, std::string>& header, std::string& response);
+    std::string gen_publish_url();
+    char* replace_buf(const char* buf, int buf_size, const char* org, int org_size, const char* to, int to_size);
+    int convert_to_payload_buf(const char* buf, int size, char** payload_buf, int* payload_size);
 
 private:
 
@@ -73,6 +77,8 @@ private:
     bool running;
     std::string rtmp_url;
     int status;
+    time_t start_time;
+    std::string channel_id;
 };
 
 #endif
