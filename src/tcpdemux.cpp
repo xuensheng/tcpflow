@@ -164,6 +164,7 @@ tcpip *tcpdemux::create_tcpip(const flow_addr &flowa, be13::tcp_seq isn,const be
     if (flowa.dport == 1935) {
         plugin = new rtmpparser(flowa, sync_parse);
         plugin->init();
+        app_list.push_back(plugin);
     }
 
     tcpip *new_tcpip = new tcpip(*this,flow,isn,plugin);

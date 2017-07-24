@@ -103,7 +103,7 @@ tcpip::~tcpip()
 {
     assert(fd<0);                       // file must be closed
     if(seen) delete seen;
-    if(myplugin) myplugin->destroy();
+    if(myplugin) myplugin->stop();
 }
 
 #pragma GCC diagnostic warning "-Weffc++"

@@ -129,6 +129,8 @@ public:
     saved_flows_t    saved_flows;     // the flows that were saved
     bool             start_new_connections;  // true if we should start new connections
 
+    std::list<appplugin*> app_list;
+
     options     opt;
     class       feature_recorder_set *fs; // where features extracted from each flow should be stored
     

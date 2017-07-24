@@ -158,9 +158,11 @@ public:
         return 0;
     }
     
-    virtual void destroy() {
+    virtual void stop() {
     }
 
+    virtual void wait_exit() {
+    }
 
     virtual int process_packet(const char* buf, size_t size) {
         return 0;

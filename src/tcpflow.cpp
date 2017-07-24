@@ -15,6 +15,7 @@
 
 #include "tcpip.h"
 #include "tcpdemux.h"
+#include "rtmpparser.h"
 #include "bulk_extractor_i.h"
 #include "iptree.h"
 
@@ -22,6 +23,7 @@
 
 #include <string>
 #include <vector>
+#include <list>
 #include <sys/types.h>
 #include <dirent.h>
 
@@ -815,7 +817,12 @@ int main(int argc, char *argv[])
         }
     }
 
-    while(1) sleep(100);
+    //等待app退出
+    for (std::list<appplugin*>::iterator it = demux.app_list.begin(); it != demux.app_list.end(); ++it) {
+        appplugin* plugin = *it;
+        plugin->wait_exit();   
+        delete plugin;
+    }
 
     exit(0);                            // return(0) causes crash on Windows
 }

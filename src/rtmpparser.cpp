@@ -23,8 +23,6 @@ void* process_packet_worker(void* args)
     rtmpparser* parser = (rtmpparser*)args;
 
     parser->main_loop();
-
-    delete parser;
 }
 
 int rtmpparser::init()
@@ -49,18 +47,22 @@ int rtmpparser::init()
     running = true;
 
     //创建线程，用于replay rtmp packets
-    pthread_t thread;
     pthread_create(&thread, NULL, process_packet_worker, this);
 
     return 0;
 }
 
-void rtmpparser::destroy()
+void rtmpparser::stop()
 {
 	DEBUG(1)("stream closed");
 
     running = false;
+}
 
+void rtmpparser::wait_exit()
+{
+    void* tret;
+    pthread_join(thread, &tret); 
 }
 
 rtmpparser::~rtmpparser()
