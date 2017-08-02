@@ -17,6 +17,7 @@ enum {
     RTMP_HANDSHAKE = 0,
     RTMP_CONNECT,
     RTMP_PUBLISH,
+    RTMP_PUSHING,
 };
 
 
@@ -37,6 +38,7 @@ public:
         pthread_mutex_init(&lock, NULL);
         running = false;
         status = RTMP_HANDSHAKE;
+        chunk_size = 128;
     }
 
     ~rtmpparser();
@@ -59,6 +61,7 @@ private:
     int do_process(const char* buf, size_t size);
     int parse_packet(char* buf, size_t size);
     void die();
+    void post_vod_playlist();
     
     int do_http_request(const std::string& method, const std::string& url, std::map<string, std::string>& header, std::string& response);
     std::string gen_publish_url();
@@ -85,6 +88,7 @@ private:
     int status;
     time_t start_time;
     std::string channel_id;
+    int chunk_size;
 };
 
 #endif

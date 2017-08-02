@@ -163,7 +163,11 @@ tcpip *tcpdemux::create_tcpip(const flow_addr &flowa, be13::tcp_seq isn,const be
     appplugin *plugin = NULL;
     if (flowa.dport == 1935) {
         plugin = new rtmpparser(flowa, sync_parse);
-        plugin->init();
+        if (plugin->init() != 0) {
+            delete plugin;
+            return NULL;
+        }
+
         app_list.push_back(plugin);
     }
 
@@ -480,6 +484,7 @@ int tcpdemux::process_tcp(const ipaddr &src, const ipaddr &dst,sa_family_t famil
 	 */
         be13::tcp_seq isn = syn_set ? seq : seq-1;
 	tcp = create_tcpip(this_flow, isn, pi);
+    if (tcp == NULL) return 0;
     }
 
     /* Now tcp is valid */
