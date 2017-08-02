@@ -37,6 +37,7 @@ int rtmpparser::init()
     bzero(&server_addr,sizeof(server_addr));
     server_addr.sin_family=AF_INET;
     server_addr.sin_port=htons(5391);
+    //server_addr.sin_port=htons(5333);
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     if(connect(sockfd, (struct sockaddr *)(&server_addr), sizeof(struct sockaddr)) == -1) {
@@ -409,6 +410,8 @@ int rtmpparser::do_http_request(const string& method, const string& url, map<str
 //获取推流地址,格式： rtmp://bucket.endpoint/live/channel_id?xxxxxxxx
 std::string rtmpparser::gen_publish_url()
 {
+    //return "rtmp://127.0.0.1:5333/live/test"; //for test
+    
     string response;
     map<string, string> header;
     int ret = do_http_request("GET", "http://127.0.0.1:7123/publishurl", header, response);
@@ -578,10 +581,10 @@ int rtmpparser::do_process(const char* buf, size_t size)
         }*/
 
         body_size = AV_RB24(head->msg_size);
-        if (AV_RB24(head->ts) == 0xffffff) {
+        /*if (AV_RB24(head->ts) == 0xffffff) {
             //extent timestamp
             body_size += 4;
-        }
+        }*/
 
         //接收到rtmp header
         if (pkt_buf_size == header_size) {
@@ -590,7 +593,7 @@ int rtmpparser::do_process(const char* buf, size_t size)
                 expect_pkt_buf_size = header_size + body_size;
                 payload_size = body_size;
             } else {
-                expect_pkt_buf_size = header_size + chunk_size + 4;
+                expect_pkt_buf_size = header_size + chunk_size + 1;
                 payload_size = chunk_size;
             }
 
@@ -599,14 +602,14 @@ int rtmpparser::do_process(const char* buf, size_t size)
         
         if (payload_size < body_size) {
             //解析下一个chunk header
-            rtmp_header* head2 = (rtmp_header *)&pkt_buf[pkt_buf_size - 4];
+            rtmp_header* head2 = (rtmp_header *)&pkt_buf[pkt_buf_size - 1];
             int header_size2 = get_header_size(head2);
             assert(header_size2 == 1);
             int left = body_size - payload_size;
             if (left <= chunk_size) {
-                expect_pkt_buf_size += (header_size2 - 4) + left;
+                expect_pkt_buf_size += (header_size2 - 1) + left;
             } else {
-                expect_pkt_buf_size += (header_size2 - 4) + chunk_size + 4;
+                expect_pkt_buf_size += (header_size2 - 1) + chunk_size + 1;
             }
             payload_size += min(left, chunk_size);
             continue;
@@ -615,7 +618,7 @@ int rtmpparser::do_process(const char* buf, size_t size)
             parse_packet(pkt_buf, pkt_buf_size);
             processed_size += pkt_buf_size;
             pkt_buf_size = 0;
-            expect_pkt_buf_size = 1;
+            expect_pkt_buf_size = 4;
             if (status >= RTMP_PUSHING) {
                 if (size > 0)
                     send_data(buf, size);

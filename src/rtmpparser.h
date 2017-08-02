@@ -33,7 +33,7 @@ public:
         pkt_buf = (char*)malloc(128*1024);
         pkt_buf_size = 0;
         pkt_buf_max_size = 1024 * 128;
-        expect_pkt_buf_size = 1;
+        expect_pkt_buf_size = 4;
         payload_size = 0;
         pthread_mutex_init(&lock, NULL);
         running = false;
