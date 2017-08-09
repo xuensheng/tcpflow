@@ -11,6 +11,9 @@
 #include "tcpflow.h"
 
 #include <iomanip>
+#include <unistd.h>
+#include <sys/syscall.h>    /* For SYS_xxx definitions */
+#include <time.h>
 
 static char *debug_prefix = NULL;
 
@@ -149,15 +152,30 @@ void mkdirs_for_path(std::string path)
  */
 void print_debug_message(const char *fmt, va_list ap)
 {
+    char buf[2048];
+    static int logfd = -1;
+
+    if (logfd == -1) {
+        sprintf(buf, "tcpflow_%ld.log", time(NULL));
+        rename("tcpflow.log", buf);
+        logfd = open("tcpflow.log", O_CREAT | O_WRONLY | O_APPEND, 0644);
+    }
+
     /* print debug prefix */
-    fprintf(stderr, "%s: ", debug_prefix);
+    //fprintf(stderr, "%s: ", debug_prefix);
 
     /* print the var-arg buffer passed to us */
-    vfprintf(stderr, fmt, ap);
+    //vfprintf(stderr, fmt, ap);
 
     /* add newline */
-    fprintf(stderr, "\n");
-    (void) fflush(stderr);
+    //fprintf(stderr, "\n");
+    //(void) fflush(stderr);
+
+    int len = snprintf(buf, sizeof(buf), "tcpflow[%ld][%ld] ", time(NULL), syscall(SYS_gettid));
+    len += vsnprintf(buf + len, sizeof(buf) - len - 1, fmt, ap);
+    buf[len] = '\n';
+
+    write(logfd, buf, len + 1);
 }
 
 /* Print a debugging or informational message */

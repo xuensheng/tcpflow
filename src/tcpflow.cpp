@@ -818,11 +818,13 @@ int main(int argc, char *argv[])
     }
 
     //等待app退出
+    DEBUG(1)("waiting for all apps..");
     for (std::list<appplugin*>::iterator it = demux.app_list.begin(); it != demux.app_list.end(); ++it) {
         appplugin* plugin = *it;
         plugin->wait_exit();   
         delete plugin;
     }
+    DEBUG(1)("all apps exited");
 
     exit(0);                            // return(0) causes crash on Windows
 }

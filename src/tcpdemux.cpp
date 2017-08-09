@@ -175,6 +175,7 @@ tcpip *tcpdemux::create_tcpip(const flow_addr &flowa, be13::tcp_seq isn,const be
     new_tcpip->nsn   = isn+1;		// expected sequence number of the first byte
     DEBUG(1) ("new flow %s. path: %s next seq num (nsn):%d",
               flowa.str().c_str(),new_tcpip->flow_pathname.c_str(),new_tcpip->nsn);
+    std::cout << "new flow " << flowa.str() << std::endl;
     flow_map[flow] = new_tcpip;
     open_flows.reset(new_tcpip);
     return new_tcpip;

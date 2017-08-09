@@ -23,6 +23,8 @@ void* process_packet_worker(void* args)
     rtmpparser* parser = (rtmpparser*)args;
 
     parser->main_loop();
+
+    return NULL;
 }
 
 int rtmpparser::init()
@@ -37,7 +39,7 @@ int rtmpparser::init()
     bzero(&server_addr,sizeof(server_addr));
     server_addr.sin_family=AF_INET;
     server_addr.sin_port=htons(5391);
-    //server_addr.sin_port=htons(5333);
+    server_addr.sin_port=htons(5333);
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     if(connect(sockfd, (struct sockaddr *)(&server_addr), sizeof(struct sockaddr)) == -1) {
@@ -122,13 +124,12 @@ void rtmpparser::post_vod_playlist()
     sprintf(start_time_str, "%ld", start_time);
     header["x-oss-start-time"] = start_time_str;
     header["x-oss-channel-id"] = channel_id;
-    int ret = do_http_request("POST", "http://127.0.0.1:7123/publishurl", header, response);
+    int ret = do_http_request("POST", "http://127.0.0.1:7123/postvodlist", header, response);
     if (ret == 0 && !response.empty()) {
         DEBUG(1)("%s post succeed: %s", flowinfo.c_str(), response.c_str());
     } else {
         DEBUG(1)("%s post failed : %s", flowinfo.c_str(), response.c_str());
     }
-    DEBUG(1)("done");
 }
 
 //发送数据到oss
@@ -156,7 +157,7 @@ int rtmpparser::send_data(const char* buf, size_t size)
 
         left -= ret;
     }
-    DEBUG(1)("send pkt size: %d ", size); 
+    DEBUG(10)("send pkt size: %lu ", size); 
     return 0;
 }
 
@@ -294,7 +295,7 @@ int ff_amf_tag_size(const uint8_t *data, const uint8_t *data_end)
         nb = bytestream_get_be32(&data);
     case AMF_DATA_TYPE_OBJECT:
         while (nb-- > 0 || type != AMF_DATA_TYPE_ARRAY) {
-            int t;
+            int tt;
             if (parse_key) {
                 int size = bytestream_get_be16(&data);
                 if (!size) {
@@ -305,10 +306,10 @@ int ff_amf_tag_size(const uint8_t *data, const uint8_t *data_end)
                     return -1;
                 data += size;
             }
-            t = ff_amf_tag_size(data, data_end);
-            if (t < 0 || t >= data_end - data)
+            tt = ff_amf_tag_size(data, data_end);
+            if (tt < 0 || tt >= data_end - data)
                 return -1;
-            data += t;
+            data += tt;
         }
         return data - base;
     case AMF_DATA_TYPE_OBJECT_END:  return 1;
@@ -399,18 +400,23 @@ int rtmpparser::do_http_request(const string& method, const string& url, map<str
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buff);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
 
-    curl_easy_perform(curl);
+    CURLcode res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
 
     response = buff;
 
-    return 0;
+    if (res == CURLE_OK) {
+        return 0;
+    } else {
+        DEBUG(1)("postvodlist failed. curl result: %d", res);
+        return -1;
+    }
 }
 
 //获取推流地址,格式： rtmp://bucket.endpoint/live/channel_id?xxxxxxxx
 std::string rtmpparser::gen_publish_url()
 {
-    //return "rtmp://127.0.0.1:5333/live/test"; //for test
+    return "rtmp://127.0.0.1:5333/live/test"; //for ffmpeg
     
     string response;
     map<string, string> header;
@@ -436,7 +442,6 @@ char* rtmpparser::replace_buf(const char* buf, int buf_size, const char* org, in
 
     assert(front > 0 && front <= buf_size);
 
-    int len = org - buf;
     memcpy(new_buf, buf, front);
     memcpy(new_buf + front, to, to_size);
     memcpy(new_buf + front + to_size, org + org_size, back);
@@ -467,7 +472,7 @@ int get_header_size(rtmp_header* head)
         header_size = 8;
     else if (fmt == 2)
         header_size = 4;
-    else if (fmt = 3)
+    else if (fmt == 3)
         header_size = 1;
 
     if(header_size >= 4)
@@ -483,7 +488,7 @@ int rtmpparser::process_packet(const char* buf, size_t size)
     if (sockfd < 0 || size < 1 || !running)
         return -1;
 
-    DEBUG(1)("capture pkt size: %d", size);
+    DEBUG(10)("capture pkt size: %lu", size);
 
     {
         char* new_buf = new char[size];
@@ -495,7 +500,7 @@ int rtmpparser::process_packet(const char* buf, size_t size)
 
         pthread_mutex_lock(&lock);
         if (sync) {
-            while (pkt_list.size() > 50 && running) {
+            while (pkt_list.size() > 100 && running) {
                 pthread_mutex_unlock(&lock);
                 usleep(1000*10);
                 pthread_mutex_lock(&lock);
@@ -504,6 +509,8 @@ int rtmpparser::process_packet(const char* buf, size_t size)
         pkt_list.push_front(pkt);
         pthread_mutex_unlock(&lock);
     }
+
+    return 0;
 }
 
 //解析packets主逻辑，主要是解析原始的rtmp流
@@ -512,9 +519,7 @@ int rtmpparser::do_process(const char* buf, size_t size)
     if (sockfd < 0 || size < 1)
         return -1;
 
-    DEBUG(1)("process pkt size: %d", size);
-
-    const char* orgbuf = buf;
+    DEBUG(10)("process pkt size: %lu", size);
 
     //握手消息3073大小
     if (processed_size < 3073) {
@@ -546,12 +551,11 @@ int rtmpparser::do_process(const char* buf, size_t size)
             pkt_buf_max_size = expect_pkt_buf_size;
         }
 
-        DEBUG(1)("expect_pkt_buf_size: %d pkt_buf_size: %d",
+        DEBUG(10)("expect_pkt_buf_size: %d pkt_buf_size: %d",
             expect_pkt_buf_size, pkt_buf_size);
 
-        int copy_size = min(expect_pkt_buf_size - pkt_buf_size, size);
+        int copy_size = min(expect_pkt_buf_size - pkt_buf_size, (int)size);
         memcpy(pkt_buf + pkt_buf_size, buf, copy_size);
-        int parsed = buf - orgbuf;
         buf += copy_size;
         size -= copy_size;
         pkt_buf_size += copy_size;
@@ -588,7 +592,7 @@ int rtmpparser::do_process(const char* buf, size_t size)
 
         //接收到rtmp header
         if (pkt_buf_size == header_size) {
-            DEBUG(1)("process pkt body size: %d", body_size);
+            DEBUG(10)("process pkt body size: %d", body_size);
             if (body_size <= chunk_size) {
                 expect_pkt_buf_size = header_size + body_size;
                 payload_size = body_size;
@@ -631,7 +635,7 @@ int rtmpparser::do_process(const char* buf, size_t size)
 }
 
 //packet buf 转换为 payload buf
-int rtmpparser::convert_to_payload_buf(const char* buf, int size, char** payload_buf, int* payload_size)
+int rtmpparser::convert_to_payload_buf(const char* buf, int size, char** pbuf, int* psize)
 {
     int pos = 0;
     int new_size = 0;
@@ -649,28 +653,28 @@ int rtmpparser::convert_to_payload_buf(const char* buf, int size, char** payload
         new_size += body_size;
     } while(pos <= size);
 
-    *payload_buf = new_buf;
-    *payload_size = new_size;
+    *pbuf = new_buf;
+    *psize = new_size;
 
     return 0;
 }
 
-void rtmpparser::send_pkt(const char* pkt_buf, int pkt_buf_size, const char* payload_buf, int payload_buf_size)
+void rtmpparser::send_pkt(const char* org_pkt_buf, int org_pkt_buf_size, const char* payload, int payload_buf_size)
 {
-    char* new_pkt_buf = new char[pkt_buf_size + 1024];
+    char* new_pkt_buf = new char[org_pkt_buf_size + 1024];
     int new_pkt_buf_size = 0;
-    rtmp_header* head = (rtmp_header *)pkt_buf;
+    rtmp_header* head = (rtmp_header *)org_pkt_buf;
     int header_size = get_header_size(head);
 
-    memcpy(new_pkt_buf, pkt_buf, header_size);
+    memcpy(new_pkt_buf, org_pkt_buf, header_size);
     new_pkt_buf_size += header_size;
-    char chunk_header = pkt_buf[0] | 0xc0;
+    char chunk_header = org_pkt_buf[0] | 0xc0;
     do {
         int send_size = min(payload_buf_size, chunk_size);
-        memcpy(new_pkt_buf + new_pkt_buf_size, payload_buf, send_size);
+        memcpy(new_pkt_buf + new_pkt_buf_size, payload, send_size);
         payload_buf_size -= send_size;
         new_pkt_buf_size += send_size;
-        payload_buf += send_size;
+        payload += send_size;
         if (payload_buf_size > 0) {
             memcpy(new_pkt_buf + new_pkt_buf_size, &chunk_header, 1);
             new_pkt_buf_size++;
@@ -712,12 +716,12 @@ int rtmpparser::parse_packet(char* buf, size_t size)
     int msg_type = head->msg_type;
     int msg_size = (head->msg_size[0] << 16) + (head->msg_size[1] << 8) + head->msg_size[2];
 
-    DEBUG(1)("pkt size: %d msg type: 0x%x body size: %d", size, msg_type, msg_size); 
+    DEBUG(5)("pkt size: %lu msg type: 0x%x body size: %d", size, msg_type, msg_size); 
 
     //set chunk size
     if (msg_type == RTMP_PT_CHUNK_SIZE) {
         chunk_size = AV_RB32((const uint8_t*)(buf + header_size));
-        DEBUG(1)("%s chunk size: %d", flowinfo.c_str(), chunk_size);
+        DEBUG(5)("%s chunk size: %d", flowinfo.c_str(), chunk_size);
     }    
 
     if (msg_type != RTMP_PT_INVOKE) {
@@ -735,8 +739,6 @@ int rtmpparser::parse_packet(char* buf, size_t size)
     int payload_buf_size = 0;
     convert_to_payload_buf(buf, size, &payload_buf, &payload_buf_size);
 
-    amf_string* amf_str = (amf_string *)(payload_buf + header_size);
-    
     if (check_cmd(payload_buf, "connect")) {
         const char* pos = memstr(payload_buf, payload_buf_size, "tcUrl");
         if (pos != NULL) {
@@ -800,14 +802,14 @@ int rtmpparser::parse_packet(char* buf, size_t size)
             AV_WB24((uint8_t*)head->msg_size, new_payload_size);
             AV_WB16((uint8_t*)new_payload_buf + (pos - payload_buf), publish_url_size);
 
-            recv_data(NULL, NULL, 3);
+            recv_data(NULL, NULL, 2);
             send_pkt(buf, size, new_payload_buf, new_payload_size);
             delete payload_buf;
             delete new_payload_buf; 
 
             char* recv_buf;
             int recv_size = 0;
-            recv_data(&recv_buf, &recv_size, 3);
+            recv_data(&recv_buf, &recv_size, 2);
             if (recv_size > 0) {
                 char code_buf[1024];
                 rtmp_header* recv_head = (rtmp_header *)recv_buf;

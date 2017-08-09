@@ -53,10 +53,11 @@ uint32_t tcpip::seen_bytes()
 void tcpip::dump_seen()
 {
     if(seen){
+        std::ostringstream out;
         for(recon_set::const_iterator it = seen->begin(); it!=seen->end(); it++){
-            std::cerr << *it << ", ";
+            out << *it << ", ";
         }
-        std::cerr << std::endl;
+	    DEBUG(10) ("seen: %s", out.str().c_str());
     }
 }
 

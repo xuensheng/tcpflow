@@ -24,21 +24,25 @@ enum {
 class rtmpparser : public appplugin {
 public:
 
-    rtmpparser(const flow_addr &flow_addr_, bool sync) :
-        appplugin(flow_addr_, sync),
+    rtmpparser(const flow_addr &flow_addr_, bool sync_) :
+        appplugin(flow_addr_, sync_),
+        flowinfo(addr.str()),
         sockfd(-1),
-        processed_size(0)
+        processed_size(0),
+        pkt_buf(NULL),
+        pkt_buf_size(0),
+        pkt_buf_max_size(0),
+        chunk_size(128),
+        expect_pkt_buf_size(4),
+        payload_size(0),
+        running(false),
+        status(RTMP_HANDSHAKE),
+        start_time(0)
     {
-        flowinfo = addr.str();
         pkt_buf = (char*)malloc(128*1024);
-        pkt_buf_size = 0;
         pkt_buf_max_size = 1024 * 128;
-        expect_pkt_buf_size = 4;
-        payload_size = 0;
         pthread_mutex_init(&lock, NULL);
-        running = false;
-        status = RTMP_HANDSHAKE;
-        chunk_size = 128;
+        memset(&thread, 0, sizeof(thread));
     }
 
     ~rtmpparser();
@@ -75,20 +79,21 @@ private:
     int sockfd;
     int processed_size;
     char* pkt_buf;
-    char* payload_buf;
     int pkt_buf_size;
     int pkt_buf_max_size;
+    int chunk_size;
     int expect_pkt_buf_size;
     int payload_size;
+
+    bool running;
+    int status;
+    time_t start_time;
+
+    std::string channel_id;
+    std::string rtmp_url;
     std::list<rtmppkt> pkt_list;
     pthread_mutex_t lock;
     pthread_t thread;
-    bool running;
-    std::string rtmp_url;
-    int status;
-    time_t start_time;
-    std::string channel_id;
-    int chunk_size;
 };
 
 #endif
