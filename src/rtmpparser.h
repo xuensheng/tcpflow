@@ -13,6 +13,12 @@ struct rtmppkt
     int size;
 };
 
+struct rtmpmsg
+{
+    char* buf;
+    int size;
+};
+
 enum {
     RTMP_HANDSHAKE = 0,
     RTMP_CONNECT,
@@ -37,7 +43,8 @@ public:
         payload_size(0),
         running(false),
         status(RTMP_HANDSHAKE),
-        start_time(0)
+        start_time(0),
+        gen_playlist(false)
     {
         pkt_buf = (char*)malloc(128*1024);
         pkt_buf_max_size = 1024 * 128;
@@ -89,6 +96,7 @@ private:
     int status;
     time_t start_time;
 
+    bool gen_playlist;
     std::string channel_id;
     std::string rtmp_url;
     std::list<rtmppkt> pkt_list;

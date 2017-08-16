@@ -156,8 +156,6 @@ void print_debug_message(const char *fmt, va_list ap)
     static int logfd = -1;
 
     if (logfd == -1) {
-        sprintf(buf, "tcpflow_%ld.log", time(NULL));
-        rename("tcpflow.log", buf);
         logfd = open("tcpflow.log", O_CREAT | O_WRONLY | O_APPEND, 0644);
     }
 

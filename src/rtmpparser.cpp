@@ -14,9 +14,13 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <map>
+#include <vector>
 #include <curl/curl.h>
+#include <netdb.h>
 
 using namespace std;
+
+extern scanner_info::scanner_config be_config; // system configuration
 
 void* process_packet_worker(void* args)
 {
@@ -27,6 +31,25 @@ void* process_packet_worker(void* args)
     return NULL;
 }
 
+bool is_digits(const string& str)
+{
+    return str.find_first_not_of("0123456789") == std::string::npos;
+}
+
+string get_ip_by_host(const string& host)
+{
+    char    buf[1024];
+    struct  hostent hostinfo,*phost;
+    int     ret;
+
+    if(gethostbyname_r(host.c_str(), &hostinfo, buf, sizeof(buf), &phost, &ret)) {
+        return "";
+    }
+
+    char ipbuf[64];
+    return inet_ntop(AF_INET, hostinfo.h_addr_list[0], ipbuf, sizeof(ipbuf));
+}
+
 int rtmpparser::init()
 {
     //创建socket，用于连接oss_server
@@ -34,13 +57,59 @@ int rtmpparser::init()
 	    DEBUG(1)("unable to open socket, error: %s", strerror(errno));
         return -1;
     }
+    
+    scanner_info si;
+    si.config = &be_config;
+    
+    int rtmp_port = 1935;
+    string rtmp_addr = "127.0.0.1";
+    si.get_config("rtmp_port", &rtmp_port, "rtmp port");
+    si.get_config("rtmp_addr", &rtmp_addr, "rtmp addr");
+    si.get_config("rtmp_url", &rtmp_url, "rtmp url");
+
+    if (!rtmp_url.empty()) {
+        if (strncmp(rtmp_url.c_str(), "rtmp://", strlen("rtmp://")) != 0) {
+            DEBUG(1)("invalid rtmp url %s", rtmp_url.c_str());
+            return -1;
+        }
+        
+        vector<string> parts = split(rtmp_url,'/');
+        if (parts.size() < 4) {
+            DEBUG(1)("invalid rtmp url %s", rtmp_url.c_str());
+            return -1;
+        }
+
+        parts = split(parts[2],':');
+        if (parts.size() == 2) {
+            rtmp_port = atoi(parts[1].c_str());
+        }
+
+        //检查是否是ip
+        string host = parts[0];
+        parts = split(host, '.');
+        if (parts.size() == 4
+            && is_digits(parts[0])
+            && is_digits(parts[1])
+            && is_digits(parts[2])
+            && is_digits(parts[3])) {
+            rtmp_addr = host;
+        } else {
+            string addr = get_ip_by_host(host);
+            if (!addr.empty()) {
+                rtmp_addr = addr;
+            } else {
+                DEBUG(1)("can not resolv host %s", host.c_str());
+            }
+        }
+    }
+
+    DEBUG(1)("connect to %s:%d, url: %s", rtmp_addr.c_str(), rtmp_port, rtmp_url.c_str());
 
     struct sockaddr_in server_addr;
     bzero(&server_addr,sizeof(server_addr));
     server_addr.sin_family=AF_INET;
-    server_addr.sin_port=htons(5391);
-    server_addr.sin_port=htons(5333);
-    server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    server_addr.sin_port=htons(rtmp_port);
+    server_addr.sin_addr.s_addr = inet_addr(rtmp_addr.c_str());
 
     if(connect(sockfd, (struct sockaddr *)(&server_addr), sizeof(struct sockaddr)) == -1) {
 	    DEBUG(1)("unable to connect socket, error: %s", strerror(errno));
@@ -107,13 +176,21 @@ void rtmpparser::main_loop()
 
 void rtmpparser::post_vod_playlist()
 {
+    if (!gen_playlist) {
+        if (sockfd > 0) {
+            close(sockfd);
+        }
+        return;
+    }
+
     //等待oss写完文件
     DEBUG(1)("waiting for playlist");
 
     sleep(3);
 
-    if (sockfd > 0);
+    if (sockfd > 0) {
         close(sockfd);
+    }
 
     sleep(2);
 
@@ -416,8 +493,6 @@ int rtmpparser::do_http_request(const string& method, const string& url, map<str
 //获取推流地址,格式： rtmp://bucket.endpoint/live/channel_id?xxxxxxxx
 std::string rtmpparser::gen_publish_url()
 {
-    return "rtmp://127.0.0.1:5333/live/test"; //for ffmpeg
-    
     string response;
     map<string, string> header;
     int ret = do_http_request("GET", "http://127.0.0.1:7123/publishurl", header, response);
@@ -542,6 +617,13 @@ int rtmpparser::do_process(const char* buf, size_t size)
     if (status >= RTMP_PUSHING) {
         send_data(buf, size);
         return 0;
+    } else if (status == RTMP_PUBLISH) {
+        const char* pos = memstr(buf, size, "deleteStream");
+        if (pos != NULL) {
+            die();
+            DEBUG(1)("unexpect deleteStream msg");
+            return -1;
+        }
     }
 
     //解析rtmp
@@ -752,13 +834,15 @@ int rtmpparser::parse_packet(char* buf, size_t size)
             }
             pos++;
             int url_size = AV_RB16((uint8_t*)pos);
-
-            rtmp_url = gen_publish_url();
-            if (rtmp_url == "") {
-                die();
-                DEBUG(1)("unable to gen publish url");
-                delete payload_buf;
-                return 0;
+            if (rtmp_url.empty()) {
+                rtmp_url = gen_publish_url();
+                if (rtmp_url.empty()) {
+                    die();
+                    DEBUG(1)("unable to gen publish url");
+                    delete payload_buf;
+                    return 0;
+                }
+                gen_playlist = true;
             }
 
             int end_pos = rtmp_url.find_last_of("/");
@@ -811,7 +895,7 @@ int rtmpparser::parse_packet(char* buf, size_t size)
             int recv_size = 0;
             recv_data(&recv_buf, &recv_size, 2);
             if (recv_size > 0) {
-                char code_buf[1024];
+                char code_buf[1024] = { 0 };
                 rtmp_header* recv_head = (rtmp_header *)recv_buf;
                 ff_amf_get_field_value((const uint8_t*)(recv_buf + get_header_size(recv_head)),
                         (const uint8_t*)(recv_buf + recv_size),
@@ -820,7 +904,8 @@ int rtmpparser::parse_packet(char* buf, size_t size)
                         sizeof(code_buf));  
                 DEBUG(1)("publish response code: %s", code_buf);
                 delete recv_buf;
-                if (strncmp(code_buf, "NetStream.Publish.Start", strlen("NetStream.Publish.Start") != 0)) {
+                char succ[] = "NetStream.Publish.Start";
+                if (strncmp(code_buf, succ, strlen(succ)) != 0) {
                     die();
                     DEBUG(1)("%s publish failed", flowinfo.c_str());
                     return 0;

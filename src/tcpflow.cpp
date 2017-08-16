@@ -553,16 +553,20 @@ int main(int argc, char *argv[])
         case 'q': opt_quiet = true; break;
 	case 'R': Rfiles.push_back(optarg); break;
 	case 'r': rfiles.push_back(optarg); break;
-        case 'S':
-	    {
-		std::vector<std::string> params = split(optarg,'=');
-		if(params.size()!=2){
-		    std::cerr << "Invalid paramter: " << optarg << "\n";
-		    exit(1);
-		}
-		be_config.namevals[params[0]] = params[1];
-		continue;
-	    }
+    case 'S':
+	        {
+                std::string args(optarg);
+                size_t pos = args.find_first_of('=');
+                if (pos == std::string::npos) {
+	    	        std::cerr << "Invalid paramter: " << optarg << "\n";
+    		        exit(1);
+                }
+                std::string key = args.substr(0, pos);
+                std::string value = args.substr(pos + 1);
+	    	    be_config.namevals[key] = value;
+	            DEBUG(10) ("%s = %s", key.c_str(), value.c_str());
+		        continue;
+	        }
 
 	case 's':
             demux.opt.output_strip_nonprint = 1; DEBUG(10) ("converting non-printable characters to '.'");
